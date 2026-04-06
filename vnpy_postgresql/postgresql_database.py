@@ -1,4 +1,5 @@
 from datetime import datetime
+from pprint import pformat
 
 from peewee import (
     AutoField,
@@ -243,6 +244,7 @@ class PostgresqlDatabase(BaseDatabase):
 
         # 将TickData数据转换为字典，并调整时区
         data: list = []
+        unique_data: dict[tuple[str, str, datetime], dict] = {}
 
         for tick in ticks:
             tick.datetime = convert_tz(tick.datetime)
@@ -252,7 +254,24 @@ class PostgresqlDatabase(BaseDatabase):
             d.pop("gateway_name")
             d.pop("vt_symbol")
             d.pop("extra", None)
-            data.append(d)
+
+            key: tuple[str, str, datetime] = (
+                d["symbol"],
+                d["exchange"],
+                d["datetime"]
+            )
+            existing: dict | None = unique_data.get(key)
+            if existing is not None:
+                print(
+                    "Duplicate tick data detected, keeping the later record: "
+                    f"symbol={key[0]}, exchange={key[1]}, datetime={key[2]}\n"
+                    f"existing={pformat(existing)}\n"
+                    f"incoming={pformat(d)}"
+                )
+
+            unique_data[key] = d
+
+        data = list(unique_data.values())
 
         # 使用upsert操作将数据更新到数据库中
         with self.db.atomic():
