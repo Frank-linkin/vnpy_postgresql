@@ -27,6 +27,7 @@ from vnpy.trader.database import (
     DB_TZ,
     convert_tz
 )
+from vnpy.trader.logger import logger
 from vnpy.trader.setting import SETTINGS
 
 
@@ -262,7 +263,7 @@ class PostgresqlDatabase(BaseDatabase):
             )
             existing: dict | None = unique_data.get(key)
             if existing is not None:
-                print(
+                logger.bind(gateway_name="PostgreSQL").warning(
                     "Duplicate tick data detected, keeping the later record: "
                     f"symbol={key[0]}, exchange={key[1]}, datetime={key[2]}\n"
                     f"existing={pformat(existing)}\n"
