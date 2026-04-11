@@ -26,6 +26,7 @@ from vnpy.trader.database import (
     DB_TZ,
     convert_tz
 )
+from vnpy.trader.logger import logger
 from vnpy.trader.setting import SETTINGS
 
 
@@ -149,6 +150,11 @@ class DbTickOverview(Model):
         indexes: tuple = ((("symbol", "exchange"), True),)
 
 
+def normalize_symbol(symbol: str) -> str:
+    """Normalize contract symbol before database operations."""
+    return symbol.upper()
+
+
 class PostgresqlDatabase(BaseDatabase):
     """PostgreSQL数据库接口"""
 
@@ -162,7 +168,7 @@ class PostgresqlDatabase(BaseDatabase):
         """保存K线数据"""
         # 读取主键参数
         bar: BarData = bars[0]
-        symbol: str = bar.symbol
+        symbol: str = normalize_symbol(bar.symbol)
         exchange: Exchange = bar.exchange
         interval: Interval = bar.interval
 
@@ -173,6 +179,7 @@ class PostgresqlDatabase(BaseDatabase):
             bar.datetime = convert_tz(bar.datetime)
 
             d: dict = bar.__dict__
+            d["symbol"] = normalize_symbol(d["symbol"])
             d["exchange"] = d["exchange"].value
             d["interval"] = d["interval"].value
             d.pop("gateway_name")
@@ -238,21 +245,56 @@ class PostgresqlDatabase(BaseDatabase):
         """保存TICK数据"""
         # 读取主键参数
         tick: TickData = ticks[0]
-        symbol: str = tick.symbol
+        symbol: str = normalize_symbol(tick.symbol)
         exchange: Exchange = tick.exchange
 
         # 将TickData数据转换为字典，并调整时区
         data: list = []
+        unique_data: dict[tuple[str, str, datetime], dict] = {}
 
         for tick in ticks:
             tick.datetime = convert_tz(tick.datetime)
 
             d: dict = tick.__dict__
+            d["symbol"] = normalize_symbol(d["symbol"])
             d["exchange"] = d["exchange"].value
             d.pop("gateway_name")
             d.pop("vt_symbol")
             d.pop("extra", None)
-            data.append(d)
+
+            key: tuple[str, str, datetime] = (
+                d["symbol"],
+                d["exchange"],
+                d["datetime"]
+            )
+            existing: dict | None = unique_data.get(key)
+            if existing is not None:
+                existing_volume: float = float(existing.get("volume", 0) or 0)
+                existing_turnover: float = float(existing.get("turnover", 0) or 0)
+                incoming_volume: float = float(d.get("volume", 0) or 0)
+                incoming_turnover: float = float(d.get("turnover", 0) or 0)
+
+                keep_incoming: bool = (
+                    incoming_volume > existing_volume
+                    or (
+                        incoming_volume == existing_volume
+                        and incoming_turnover >= existing_turnover
+                    )
+                )
+
+                logger.bind(gateway_name="PostgreSQL").warning(
+                    "Duplicate tick data detected, resolving by volume/turnover: "
+                    f"symbol={key[0]}, exchange={key[1]}, datetime={key[2]}\n"
+                    f"existing_volume={existing_volume}, existing_turnover={existing_turnover}, "
+                    f"incoming_volume={incoming_volume}, incoming_turnover={incoming_turnover}, "
+                    f"kept={'incoming' if keep_incoming else 'existing'}"
+                )
+                if not keep_incoming:
+                    continue
+
+            unique_data[key] = d
+
+        data = list(unique_data.values())
 
         # 使用upsert操作将数据更新到数据库中
         with self.db.atomic():
@@ -339,6 +381,8 @@ class PostgresqlDatabase(BaseDatabase):
         end: datetime
     ) -> list[BarData]:
         """读取K线数据"""
+        symbol = normalize_symbol(symbol)
+
         s: ModelSelect = (
             DbBarData.select().where(
                 (DbBarData.symbol == symbol)
@@ -377,6 +421,8 @@ class PostgresqlDatabase(BaseDatabase):
         end: datetime
     ) -> list[TickData]:
         """读取TICK数据"""
+        symbol = normalize_symbol(symbol)
+
         s: ModelSelect = (
             DbTickData.select().where(
                 (DbTickData.symbol == symbol)
@@ -438,6 +484,8 @@ class PostgresqlDatabase(BaseDatabase):
         interval: Interval
     ) -> int:
         """删除K线数据"""
+        symbol = normalize_symbol(symbol)
+
         d: ModelDelete = DbBarData.delete().where(
             (DbBarData.symbol == symbol)
             & (DbBarData.exchange == exchange.value)
@@ -460,6 +508,8 @@ class PostgresqlDatabase(BaseDatabase):
         exchange: Exchange
     ) -> int:
         """删除TICK数据"""
+        symbol = normalize_symbol(symbol)
+
         d: ModelDelete = DbTickData.delete().where(
             (DbTickData.symbol == symbol)
             & (DbTickData.exchange == exchange.value)
